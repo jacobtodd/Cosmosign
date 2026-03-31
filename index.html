@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cosmosign — Sign & Verify with Keplr</title>
+  <!-- SHA-256 -->
+  <script src="https://cdn.jsdelivr.net/npm/js-sha256@0.9.0/build/sha256.min.js"></script>
+  <!-- secp256k1 -->
+  <script src="https://cdn.jsdelivr.net/npm/elliptic@6.5.4/dist/elliptic.min.js"></script>
+  <!-- RIPEMD-160 (for address derivation) -->
+  <script src="https://cdn.jsdelivr.net/npm/hash.js@1.1.7/lib/hash.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d0f14;
+      --surface: #161b26;
+      --surface2: #1e2535;
+      --border: #2a3147;
+      --accent: #7c3aed;
+      --accent-hover: #9461f5;
+      --accent-dim: rgba(124, 58, 237, 0.12);
+      --text: #e8eaf0;
+      --text-muted: #7a8499;
+      --success: #22c55e;
+      --success-dim: rgba(34, 197, 94, 0.12);
+      --error: #ef4444;
+      --error-dim: rgba(239, 68, 68, 0.12);
+      --warning: #f59e0b;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; }
+
+    .app { min-height: 100vh; display: flex; flex-direction: column; }
+
+    header { border-bottom: 1px solid var(--border); padding: 0 2rem; height: 64px; display: flex; align-items: center; justify-content: space-between; background: var(--surface); position: sticky; top: 0; z-index: 10; }
+    .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.2rem; letter-spacing: -0.02em; }
+    .logo-icon { width: 32px; height: 32px; background: linear-gradient(135deg, #7c3aed, #4f46e5); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+    .logo span { color: var(--accent); }
+
+    main { flex: 1; display: flex; flex-direction: column; align-items: center; padding: 3rem 1.5rem; gap: 2rem; }
+
+    .wallet-bar { width: 100%; max-width: 680px; }
+    .wallet-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+    .wallet-info { display: flex; align-items: center; gap: 0.75rem; }
+    .wallet-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; transition: background 0.2s; }
+    .wallet-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
+    .wallet-label { font-size: 0.85rem; color: var(--text-muted); }
+    .wallet-address { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.85rem; color: var(--accent); cursor: pointer; }
+    .wallet-address:hover { color: var(--accent-hover); }
+
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 0.6rem 1.25rem; border-radius: var(--radius-sm); font-size: 0.9rem; font-weight: 600; cursor: pointer; border: none; transition: all 0.15s; white-space: nowrap; }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); transform: translateY(-1px); }
+    .btn-danger { background: transparent; color: var(--error); border: 1px solid var(--error); }
+    .btn-danger:hover:not(:disabled) { background: var(--error-dim); }
+
+    .tabs-container { width: 100%; max-width: 680px; }
+    .tabs { display: flex; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    .tab-btn { flex: 1; padding: 0.85rem 1rem; background: transparent; border: none; color: var(--text-muted); font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: all 0.15s; border-bottom: 2px solid transparent; }
+    .tab-btn:hover { color: var(--text); background: var(--surface2); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--accent-dim); }
+
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    .card { width: 100%; max-width: 680px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.75rem; }
+    .card-title { font-size: 1rem; font-weight: 700; margin-bottom: 1.25rem; display: flex; align-items: center; gap: 0.5rem; }
+
+    .field { margin-bottom: 1.1rem; }
+    label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+    textarea, input[type="text"], select { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 0.9rem; padding: 0.7rem 0.9rem; font-family: inherit; outline: none; transition: border-color 0.15s; }
+    textarea { resize: vertical; min-height: 80px; }
+    textarea:focus, input[type="text"]:focus, select:focus { border-color: var(--accent); }
+    select option { background: var(--surface2); }
+
+    .result { margin-top: 1.25rem; border-radius: var(--radius-sm); padding: 1rem 1.1rem; border: 1px solid; display: none; animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .result.success { background: var(--success-dim); border-color: var(--success); }
+    .result.error   { background: var(--error-dim);   border-color: var(--error); }
+    .result.info    { background: var(--accent-dim);  border-color: var(--accent); }
+    .result-header { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.6rem; }
+    .result.success .result-header { color: var(--success); }
+    .result.error   .result-header { color: var(--error); }
+    .result.info    .result-header { color: var(--accent); }
+    .result-row { margin-bottom: 0.5rem; }
+    .result-row:last-child { margin-bottom: 0; }
+    .result-key { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
+    .result-val { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.78rem; word-break: break-all; color: var(--text); cursor: pointer; }
+    .result-val:hover { color: var(--accent); }
+
+    .banner { display: flex; align-items: flex-start; gap: 0.6rem; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); border-radius: var(--radius-sm); padding: 0.75rem 0.9rem; font-size: 0.82rem; color: var(--warning); margin-bottom: 1.1rem; }
+    .divider { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
+
+    .toast { position: fixed; bottom: 2rem; right: 2rem; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.65rem 1.1rem; border-radius: var(--radius-sm); font-size: 0.85rem; font-weight: 500; z-index: 100; opacity: 0; transform: translateY(8px); transition: all 0.2s; pointer-events: none; }
+    .toast.show { opacity: 1; transform: none; }
+
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    footer { text-align: center; padding: 1.5rem; color: var(--text-muted); font-size: 0.8rem; border-top: 1px solid var(--border); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); }
+
+    @media (max-width: 480px) { header { padding: 0 1rem; } main { padding: 1.5rem 1rem; } .card { padding: 1.25rem; } }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">&#9998;</div>
+      Cosmos<span>sign</span>
+    </div>
+    <div style="font-size:0.78rem;color:var(--text-muted);">Cosmos Message Signing</div>
+  </header>
+
+  <main>
+
+    <!-- Wallet bar -->
+    <div class="wallet-bar">
+      <div class="wallet-card">
+        <div class="wallet-info">
+          <div class="wallet-dot" id="walletDot"></div>
+          <div>
+            <div class="wallet-label" id="walletLabel">Not connected</div>
+            <div class="wallet-address" id="walletAddress" title="Click to copy"></div>
+          </div>
+        </div>
+        <div style="display:flex;gap:0.5rem;align-items:center;">
+          <!-- Chain selector (shown when not connected) -->
+          <select id="chainSelect" style="width:auto;padding:0.55rem 0.75rem;font-size:0.85rem;">
+            <option value="cosmoshub-4|cosmos">Cosmos Hub</option>
+            <option value="osmosis-1|osmo">Osmosis</option>
+            <option value="juno-1|juno">Juno</option>
+            <option value="stargaze-1|stars">Stargaze</option>
+            <option value="injective-1|inj">Injective</option>
+            <option value="celestia|celestia">Celestia</option>
+            <option value="dydx-mainnet-1|dydx">dYdX</option>
+            <option value="noble-1|noble">Noble</option>
+          </select>
+          <button class="btn btn-primary" id="connectBtn">Connect Keplr</button>
+          <button class="btn btn-danger" id="disconnectBtn" style="display:none;">Disconnect</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs-container">
+      <div class="tabs">
+        <button class="tab-btn active" id="tabSign">&#9998; Sign Message</button>
+        <button class="tab-btn" id="tabVerify">&#10003; Verify Message</button>
+      </div>
+    </div>
+
+    <!-- Sign Panel -->
+    <div class="card tab-panel active" id="panel-sign">
+      <div class="card-title">&#9998; Sign a Message</div>
+      <div class="banner">&#9888; Only sign messages you understand. Signing does not authorize any transaction.</div>
+      <div class="field">
+        <label for="signMessage">Message</label>
+        <textarea id="signMessage" placeholder="Enter the message you want to sign..."></textarea>
+      </div>
+      <button class="btn btn-primary" id="signBtn" disabled style="width:100%;">Connect wallet to sign</button>
+      <div class="result" id="signResult">
+        <div class="result-header" id="signResultHeader"></div>
+        <div id="signResultBody"></div>
+      </div>
+    </div>
+
+    <!-- Verify Panel -->
+    <div class="card tab-panel" id="panel-verify">
+      <div class="card-title">&#10003; Verify a Signature</div>
+      <p style="font-size:0.85rem;color:var(--text-muted);margin-bottom:1.25rem;">
+        Cryptographically verify a message was signed by a specific Cosmos address. All fields are required.
+      </p>
+      <div class="field">
+        <label for="verifyMessage">Original Message</label>
+        <textarea id="verifyMessage" placeholder="The original plaintext message..." style="min-height:80px;"></textarea>
+      </div>
+      <div class="field">
+        <label for="verifyAddress">Signer Address (bech32)</label>
+        <input type="text" id="verifyAddress" style="font-family:monospace;font-size:0.82rem;" placeholder="cosmos1... / osmo1... / juno1..." />
+      </div>
+      <div class="field">
+        <label for="verifySignature">Signature (base64)</label>
+        <input type="text" id="verifySignature" style="font-family:monospace;font-size:0.82rem;" placeholder="base64 encoded signature..." />
+      </div>
+      <div class="field">
+        <label for="verifyPubKey">Public Key (base64)</label>
+        <input type="text" id="verifyPubKey" style="font-family:monospace;font-size:0.82rem;" placeholder="base64 encoded public key..." />
+      </div>
+      <button class="btn btn-primary" id="verifyBtn" style="width:100%;">Verify Signature</button>
+      <div class="result" id="verifyResult">
+        <div class="result-header" id="verifyResultHeader"></div>
+        <div id="verifyResultBody"></div>
+      </div>
+    </div>
+
+    <!-- How it works -->
+    <div class="card" style="max-width:680px;">
+      <div class="card-title">&#8505; How it works</div>
+      <div style="font-size:0.85rem;color:var(--text-muted);line-height:1.8;">
+        <strong style="color:var(--text);">Signing</strong> — Keplr signs your message using <strong style="color:var(--text);">ADR-036</strong>, the Cosmos off-chain signing standard.
+        Your message is wrapped in a canonical amino document and signed with your wallet's secp256k1 private key.<br/><br/>
+        <strong style="color:var(--text);">Verification</strong> — The secp256k1 signature is verified entirely in your browser using the elliptic library.
+        The signer's address is cryptographically derived from the public key using <code style="color:var(--accent);">SHA-256 → RIPEMD-160 → bech32</code>,
+        proving the signature genuinely came from that address.
+      </div>
+    </div>
+
+  </main>
+
+  <footer>
+    Cosmosign &mdash; client-side only &middot; no data sent to any server &middot;
+    <a href="https://www.keplr.app" target="_blank" rel="noopener">Keplr Wallet</a>
+  </footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let connectedAddr   = null;
+  let connectedPubKey = null; // base64
+  let connectedChain  = null; // { id, prefix }
+  const ec = new elliptic.ec('secp256k1');
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  function bytesToB64(bytes) {
+    return btoa(String.fromCharCode(...bytes));
+  }
+
+  function utf8ToB64(str) {
+    const bytes = new TextEncoder().encode(str);
+    return bytesToB64(bytes);
+  }
+
+  function shortAddr(addr) {
+    if (!addr) return '';
+    return addr.slice(0, 10) + '…' + addr.slice(-6);
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  function copyText(text) {
+    navigator.clipboard.writeText(text).then(() => showToast('Copied to clipboard'));
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function showResult(id, type, header, rows) {
+    const box  = document.getElementById(id);
+    const hdr  = document.getElementById(id + 'Header');
+    const body = document.getElementById(id + 'Body');
+    box.className = 'result ' + type;
+    hdr.innerHTML = header;
+    body.innerHTML = rows.map(r => `
+      <div class="result-row">
+        <div class="result-key">${escHtml(r.key)}</div>
+        <div class="result-val" data-copy="${escHtml(r.val)}">${escHtml(r.val)}</div>
+      </div>`).join('');
+    box.style.display = 'block';
+    box.querySelectorAll('.result-val').forEach(el =>
+      el.addEventListener('click', () => copyText(el.dataset.copy))
+    );
+  }
+
+  // ── ADR-036 amino serialization ────────────────────────────────────────────
+  // Produces canonical sorted JSON (keys alphabetical at every level)
+  function sortedJSON(obj) {
+    if (Array.isArray(obj)) return '[' + obj.map(sortedJSON).join(',') + ']';
+    if (obj !== null && typeof obj === 'object') {
+      const keys = Object.keys(obj).sort();
+      return '{' + keys.map(k => JSON.stringify(k) + ':' + sortedJSON(obj[k])).join(',') + '}';
+    }
+    return JSON.stringify(obj);
+  }
+
+  // Build the ADR-036 amino sign document and return its UTF-8 bytes
+  function makeADR36SignBytes(signerAddress, message) {
+    const doc = {
+      account_number: '0',
+      chain_id: '',
+      fee: { amount: [], gas: '0' },
+      memo: '',
+      msgs: [{
+        type: 'sign/MsgSignData',
+        value: {
+          data: utf8ToB64(message),
+          signer: signerAddress
+        }
+      }],
+      sequence: '0'
+    };
+    return new TextEncoder().encode(sortedJSON(doc));
+  }
+
+  // ── Bech32 (inline minimal implementation) ────────────────────────────────
+  const B32_CHARS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  const B32_GEN   = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+
+  function b32Polymod(vals) {
+    let c = 1;
+    for (const v of vals) {
+      const t = c >> 25;
+      c = ((c & 0x1ffffff) << 5) ^ v;
+      for (let i = 0; i < 5; i++) if ((t >> i) & 1) c ^= B32_GEN[i];
+    }
+    return c;
+  }
+
+  function b32HrpExpand(hrp) {
+    const r = [];
+    for (const ch of hrp) r.push(ch.charCodeAt(0) >> 5);
+    r.push(0);
+    for (const ch of hrp) r.push(ch.charCodeAt(0) & 31);
+    return r;
+  }
+
+  function b32Checksum(hrp, data) {
+    const poly = b32Polymod([...b32HrpExpand(hrp), ...data, 0,0,0,0,0,0]) ^ 1;
+    return Array.from({length: 6}, (_, i) => (poly >> (5 * (5 - i))) & 31);
+  }
+
+  function convertBits(data, from, to) {
+    let acc = 0, bits = 0;
+    const result = [];
+    for (const v of data) {
+      acc = (acc << from) | v;
+      bits += from;
+      while (bits >= to) { bits -= to; result.push((acc >> bits) & ((1 << to) - 1)); }
+    }
+    if (bits > 0) result.push((acc << (to - bits)) & ((1 << to) - 1));
+    return result;
+  }
+
+  function bech32Encode(hrp, dataBytes) {
+    const words = convertBits(dataBytes, 8, 5);
+    const combined = [...words, ...b32Checksum(hrp, words)];
+    return hrp + '1' + combined.map(d => B32_CHARS[d]).join('');
+  }
+
+  // ── Address derivation ─────────────────────────────────────────────────────
+  // Cosmos address = bech32( prefix, RIPEMD-160( SHA-256( compressedPubKey ) ) )
+  function pubKeyToAddress(pubKeyB64, bech32Prefix) {
+    const pubBytes  = b64ToBytes(pubKeyB64);
+    const sha256Arr = sha256.array(pubBytes);                         // number[]
+    const ripeArr   = hash.ripemd160().update(sha256Arr).digest();    // number[]
+    return bech32Encode(bech32Prefix, ripeArr);
+  }
+
+  // Extract bech32 prefix from an address (everything before the last '1')
+  function getPrefix(address) {
+    const idx = address.lastIndexOf('1');
+    return idx > 0 ? address.slice(0, idx) : 'cosmos';
+  }
+
+  // ── Chain selector ─────────────────────────────────────────────────────────
+  function getSelectedChain() {
+    const [id, prefix] = document.getElementById('chainSelect').value.split('|');
+    return { id, prefix };
+  }
+
+  // ── Wallet UI ──────────────────────────────────────────────────────────────
+  function setConnected(addr, pubKey, chain) {
+    connectedAddr   = addr;
+    connectedPubKey = pubKey;
+    connectedChain  = chain;
+    document.getElementById('walletDot').classList.add('connected');
+    document.getElementById('walletLabel').textContent = `Keplr · ${chain.id}`;
+    const el = document.getElementById('walletAddress');
+    el.textContent = shortAddr(addr); el.title = addr;
+    document.getElementById('connectBtn').style.display    = 'none';
+    document.getElementById('disconnectBtn').style.display = '';
+    document.getElementById('chainSelect').style.display   = 'none';
+    const sb = document.getElementById('signBtn');
+    sb.disabled = false; sb.textContent = 'Sign Message';
+  }
+
+  function setDisconnected() {
+    connectedAddr = connectedPubKey = connectedChain = null;
+    document.getElementById('walletDot').classList.remove('connected');
+    document.getElementById('walletLabel').textContent   = 'Not connected';
+    document.getElementById('walletAddress').textContent = '';
+    document.getElementById('walletAddress').title       = '';
+    document.getElementById('connectBtn').style.display    = '';
+    document.getElementById('disconnectBtn').style.display = 'none';
+    document.getElementById('chainSelect').style.display   = '';
+    const sb = document.getElementById('signBtn');
+    sb.disabled = true; sb.textContent = 'Connect wallet to sign';
+  }
+
+  // ── Connect ────────────────────────────────────────────────────────────────
+  async function connectWallet() {
+    if (!window.keplr) {
+      showResult('signResult', 'error', '&#9888; Keplr not detected', [{
+        key: 'Action',
+        val: 'Install the Keplr browser extension and reload this page. Download at keplr.app'
+      }]);
+      return;
+    }
+
+    const chain = getSelectedChain();
+    const btn   = document.getElementById('connectBtn');
+    btn.innerHTML = '<span class="spinner"></span> Connecting…';
+    btn.disabled  = true;
+
+    try {
+      await window.keplr.enable(chain.id);
+      const key = await window.keplr.getKey(chain.id);
+      // key.bech32Address, key.pubKey (Uint8Array), key.name
+      const pubKeyB64 = bytesToB64(key.pubKey);
+      setConnected(key.bech32Address, pubKeyB64, chain);
+    } catch (err) {
+      btn.textContent = 'Connect Keplr';
+      btn.disabled    = false;
+      showResult('signResult', 'error', '&#10007; Connection failed', [{
+        key: 'Error', val: err.message || 'User rejected the request'
+      }]);
+    }
+  }
+
+  function disconnectWallet() { setDisconnected(); }
+
+  // ── Sign ───────────────────────────────────────────────────────────────────
+  async function signMessage() {
+    const msgVal  = document.getElementById('signMessage').value.trim();
+    const signBtn = document.getElementById('signBtn');
+
+    if (!msgVal) {
+      showResult('signResult', 'error', '&#10007; Missing input', [{
+        key: 'Error', val: 'Please enter a message to sign.'
+      }]);
+      return;
+    }
+    if (!connectedAddr) {
+      showResult('signResult', 'error', '&#10007; Not connected', [{
+        key: 'Error', val: 'Connect your Keplr wallet first.'
+      }]);
+      return;
+    }
+
+    signBtn.innerHTML = '<span class="spinner"></span> Waiting for Keplr…';
+    signBtn.disabled  = true;
+
+    try {
+      // Keplr signArbitrary uses ADR-036 internally
+      const sig = await window.keplr.signArbitrary(
+        connectedChain.id,
+        connectedAddr,
+        msgVal
+      );
+      // sig = { signature: base64, pub_key: { type, value: base64 } }
+      const pubKeyB64 = sig.pub_key.value;
+      const sigB64    = sig.signature;
+
+      // Auto-fill verify tab
+      document.getElementById('verifyMessage').value   = msgVal;
+      document.getElementById('verifyAddress').value   = connectedAddr;
+      document.getElementById('verifySignature').value = sigB64;
+      document.getElementById('verifyPubKey').value    = pubKeyB64;
+
+      showResult('signResult', 'success', '&#10003; Message signed', [
+        { key: 'Address',    val: connectedAddr },
+        { key: 'Public Key', val: pubKeyB64 },
+        { key: 'Signature',  val: sigB64 },
+        { key: 'Chain',      val: connectedChain.id },
+      ]);
+    } catch (err) {
+      showResult('signResult', 'error', '&#10007; Signing failed', [{
+        key: 'Error', val: err.message || 'User rejected the signing request.'
+      }]);
+    } finally {
+      signBtn.disabled    = false;
+      signBtn.textContent = 'Sign Message';
+    }
+  }
+
+  // ── Verify ─────────────────────────────────────────────────────────────────
+  function verifyMessage() {
+    const message   = document.getElementById('verifyMessage').value.trim();
+    const address   = document.getElementById('verifyAddress').value.trim();
+    const sigB64    = document.getElementById('verifySignature').value.trim();
+    const pubKeyB64 = document.getElementById('verifyPubKey').value.trim();
+
+    if (!message || !address || !sigB64 || !pubKeyB64) {
+      showResult('verifyResult', 'error', '&#10007; Missing fields', [{
+        key: 'Error', val: 'All four fields are required.'
+      }]);
+      return;
+    }
+
+    try {
+      // 1. Reconstruct ADR-036 amino sign bytes
+      const signBytes = makeADR36SignBytes(address, message);
+
+      // 2. SHA-256 hash of the sign bytes
+      const hashHex = sha256(signBytes);
+
+      // 3. Decode signature and public key
+      const sigBytes    = b64ToBytes(sigB64);
+      const pubKeyBytes = b64ToBytes(pubKeyB64);
+
+      if (sigBytes.length !== 64)
+        throw new Error(`Signature must be 64 bytes (got ${sigBytes.length})`);
+      if (pubKeyBytes.length !== 33)
+        throw new Error(`Public key must be 33 bytes compressed secp256k1 (got ${pubKeyBytes.length})`);
+
+      // 4. Verify secp256k1 signature (r = first 32 bytes, s = last 32 bytes)
+      const key    = ec.keyFromPublic(pubKeyBytes);
+      const r      = Array.from(sigBytes.slice(0, 32));
+      const s      = Array.from(sigBytes.slice(32, 64));
+      const valid  = ec.verify(hashHex, { r, s }, key);
+
+      if (!valid) {
+        showResult('verifyResult', 'error', '&#10007; Invalid signature', [{
+          key: 'Result', val: 'Signature does NOT match — message may have been altered or signed by a different key.'
+        }]);
+        return;
+      }
+
+      // 5. Derive address from public key and confirm it matches
+      const prefix   = getPrefix(address);
+      const derived  = pubKeyToAddress(pubKeyB64, prefix);
+      const matches  = derived.toLowerCase() === address.toLowerCase();
+
+      showResult('verifyResult', 'success', '&#10003; Signature verified', [
+        { key: 'Result',          val: 'Valid secp256k1 signature ✓' },
+        { key: 'Signer Address',  val: derived },
+        { key: 'Address Match',   val: matches ? 'Yes — public key matches the provided address ✓' : `⚠ Derived ${derived} but provided ${address}` },
+        { key: 'Public Key',      val: pubKeyB64 },
+      ]);
+    } catch (err) {
+      showResult('verifyResult', 'error', '&#10007; Verification error', [{
+        key: 'Error', val: err.message || 'Check that all fields are correct.'
+      }]);
+    }
+  }
+
+  // ── Tabs ───────────────────────────────────────────────────────────────────
+  function switchTab(name) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    const cap = name[0].toUpperCase() + name.slice(1);
+    document.getElementById('tab' + cap).classList.add('active');
+    document.getElementById('panel-' + name).classList.add('active');
+  }
+
+  // ── Wire up ────────────────────────────────────────────────────────────────
+  document.getElementById('connectBtn').addEventListener('click', connectWallet);
+  document.getElementById('disconnectBtn').addEventListener('click', disconnectWallet);
+  document.getElementById('signBtn').addEventListener('click', signMessage);
+  document.getElementById('verifyBtn').addEventListener('click', verifyMessage);
+  document.getElementById('tabSign').addEventListener('click', () => switchTab('sign'));
+  document.getElementById('tabVerify').addEventListener('click', () => switchTab('verify'));
+  document.getElementById('walletAddress').addEventListener('click', () => {
+    if (connectedAddr) copyText(connectedAddr);
+  });
+</script>
+</body>
+</html>
