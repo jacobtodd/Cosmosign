@@ -4,12 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cosmosign — Sign & Verify with Keplr</title>
-  <!-- SHA-256 -->
-  <script src="https://cdn.jsdelivr.net/npm/js-sha256@0.9.0/build/sha256.min.js"></script>
-  <!-- secp256k1 -->
+  <!-- crypto-js: SHA-256 + RIPEMD-160 (reliable UMD browser build) -->
+  <script src="https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.js"></script>
+  <!-- elliptic: secp256k1 (UMD browser build) -->
   <script src="https://cdn.jsdelivr.net/npm/elliptic@6.5.4/dist/elliptic.min.js"></script>
-  <!-- RIPEMD-160 (for address derivation) -->
-  <script src="https://cdn.jsdelivr.net/npm/hash.js@1.1.7/lib/hash.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -225,32 +223,80 @@
 <div class="toast" id="toast"></div>
 
 <script>
+  // ── Event listeners FIRST — before any crypto init that could throw ────────
+  // Tabs and buttons must work even if a CDN script fails to load.
+  function switchTab(name) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    const cap = name[0].toUpperCase() + name.slice(1);
+    document.getElementById('tab' + cap).classList.add('active');
+    document.getElementById('panel-' + name).classList.add('active');
+  }
+  document.getElementById('tabSign').addEventListener('click',   () => switchTab('sign'));
+  document.getElementById('tabVerify').addEventListener('click', () => switchTab('verify'));
+  document.getElementById('connectBtn').addEventListener('click',    () => connectWallet());
+  document.getElementById('disconnectBtn').addEventListener('click', () => disconnectWallet());
+  document.getElementById('signBtn').addEventListener('click',   () => signMessage());
+  document.getElementById('verifyBtn').addEventListener('click', () => verifyMessage());
+  document.getElementById('walletAddress').addEventListener('click', () => {
+    if (connectedAddr) copyText(connectedAddr);
+  });
+
   // ── State ──────────────────────────────────────────────────────────────────
   let connectedAddr   = null;
-  let connectedPubKey = null; // base64
-  let connectedChain  = null; // { id, prefix }
-  const ec = new elliptic.ec('secp256k1');
+  let connectedPubKey = null;
+  let connectedChain  = null;
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-  function b64ToBytes(b64) {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  // ── Crypto helpers (lazy — only called inside async/try-catch) ─────────────
+  function getEC() {
+    if (typeof elliptic === 'undefined') throw new Error('elliptic library did not load — check your internet connection and reload.');
+    return new elliptic.ec('secp256k1');
+  }
+
+  // crypto-js WordArray → regular byte array
+  function wordArrayToBytes(wa) {
+    const bytes = [];
+    for (let i = 0; i < wa.sigBytes; i++)
+      bytes.push((wa.words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff);
     return bytes;
   }
 
+  function sha256Bytes(input) {
+    if (typeof CryptoJS === 'undefined') throw new Error('crypto-js library did not load — check your internet connection and reload.');
+    const wa = CryptoJS.SHA256(CryptoJS.lib.WordArray.create(input));
+    return wordArrayToBytes(wa);
+  }
+
+  function sha256Hex(input) {
+    return sha256Bytes(input).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function ripemd160Bytes(input) {
+    if (typeof CryptoJS === 'undefined') throw new Error('crypto-js library did not load — check your internet connection and reload.');
+    const wa = CryptoJS.RIPEMD160(CryptoJS.lib.WordArray.create(input));
+    return wordArrayToBytes(wa);
+  }
+
+  // ── General helpers ────────────────────────────────────────────────────────
+  function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
   function bytesToB64(bytes) {
-    return btoa(String.fromCharCode(...bytes));
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
   }
 
   function utf8ToB64(str) {
-    const bytes = new TextEncoder().encode(str);
-    return bytesToB64(bytes);
+    return bytesToB64(new TextEncoder().encode(str));
   }
 
   function shortAddr(addr) {
-    if (!addr) return '';
-    return addr.slice(0, 10) + '…' + addr.slice(-6);
+    return addr ? addr.slice(0, 10) + '…' + addr.slice(-6) : '';
   }
 
   function showToast(msg) {
@@ -288,36 +334,27 @@
   }
 
   // ── ADR-036 amino serialization ────────────────────────────────────────────
-  // Produces canonical sorted JSON (keys alphabetical at every level)
   function sortedJSON(obj) {
     if (Array.isArray(obj)) return '[' + obj.map(sortedJSON).join(',') + ']';
     if (obj !== null && typeof obj === 'object') {
-      const keys = Object.keys(obj).sort();
-      return '{' + keys.map(k => JSON.stringify(k) + ':' + sortedJSON(obj[k])).join(',') + '}';
+      return '{' + Object.keys(obj).sort().map(k => JSON.stringify(k) + ':' + sortedJSON(obj[k])).join(',') + '}';
     }
     return JSON.stringify(obj);
   }
 
-  // Build the ADR-036 amino sign document and return its UTF-8 bytes
   function makeADR36SignBytes(signerAddress, message) {
     const doc = {
       account_number: '0',
       chain_id: '',
       fee: { amount: [], gas: '0' },
       memo: '',
-      msgs: [{
-        type: 'sign/MsgSignData',
-        value: {
-          data: utf8ToB64(message),
-          signer: signerAddress
-        }
-      }],
+      msgs: [{ type: 'sign/MsgSignData', value: { data: utf8ToB64(message), signer: signerAddress } }],
       sequence: '0'
     };
     return new TextEncoder().encode(sortedJSON(doc));
   }
 
-  // ── Bech32 (inline minimal implementation) ────────────────────────────────
+  // ── Bech32 (inline) ────────────────────────────────────────────────────────
   const B32_CHARS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
   const B32_GEN   = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
 
@@ -348,8 +385,7 @@
     let acc = 0, bits = 0;
     const result = [];
     for (const v of data) {
-      acc = (acc << from) | v;
-      bits += from;
+      acc = (acc << from) | v; bits += from;
       while (bits >= to) { bits -= to; result.push((acc >> bits) & ((1 << to) - 1)); }
     }
     if (bits > 0) result.push((acc << (to - bits)) & ((1 << to) - 1));
@@ -358,20 +394,17 @@
 
   function bech32Encode(hrp, dataBytes) {
     const words = convertBits(dataBytes, 8, 5);
-    const combined = [...words, ...b32Checksum(hrp, words)];
-    return hrp + '1' + combined.map(d => B32_CHARS[d]).join('');
+    return hrp + '1' + [...words, ...b32Checksum(hrp, words)].map(d => B32_CHARS[d]).join('');
   }
 
-  // ── Address derivation ─────────────────────────────────────────────────────
-  // Cosmos address = bech32( prefix, RIPEMD-160( SHA-256( compressedPubKey ) ) )
-  function pubKeyToAddress(pubKeyB64, bech32Prefix) {
-    const pubBytes  = b64ToBytes(pubKeyB64);
-    const sha256Arr = sha256.array(pubBytes);                         // number[]
-    const ripeArr   = hash.ripemd160().update(sha256Arr).digest();    // number[]
-    return bech32Encode(bech32Prefix, ripeArr);
+  // ── Address derivation: SHA-256 → RIPEMD-160 → bech32 ─────────────────────
+  function pubKeyToAddress(pubKeyB64, prefix) {
+    const pubBytes   = b64ToBytes(pubKeyB64);
+    const sha256Out  = sha256Bytes(pubBytes);
+    const ripemd160  = ripemd160Bytes(sha256Out);
+    return bech32Encode(prefix, ripemd160);
   }
 
-  // Extract bech32 prefix from an address (everything before the last '1')
   function getPrefix(address) {
     const idx = address.lastIndexOf('1');
     return idx > 0 ? address.slice(0, idx) : 'cosmos';
@@ -385,9 +418,7 @@
 
   // ── Wallet UI ──────────────────────────────────────────────────────────────
   function setConnected(addr, pubKey, chain) {
-    connectedAddr   = addr;
-    connectedPubKey = pubKey;
-    connectedChain  = chain;
+    connectedAddr = addr; connectedPubKey = pubKey; connectedChain = chain;
     document.getElementById('walletDot').classList.add('connected');
     document.getElementById('walletLabel').textContent = `Keplr · ${chain.id}`;
     const el = document.getElementById('walletAddress');
@@ -416,26 +447,20 @@
   async function connectWallet() {
     if (!window.keplr) {
       showResult('signResult', 'error', '&#9888; Keplr not detected', [{
-        key: 'Action',
-        val: 'Install the Keplr browser extension and reload this page. Download at keplr.app'
+        key: 'Action', val: 'Install the Keplr browser extension and reload this page. Download at keplr.app'
       }]);
       return;
     }
-
     const chain = getSelectedChain();
-    const btn   = document.getElementById('connectBtn');
+    const btn = document.getElementById('connectBtn');
     btn.innerHTML = '<span class="spinner"></span> Connecting…';
-    btn.disabled  = true;
-
+    btn.disabled = true;
     try {
       await window.keplr.enable(chain.id);
       const key = await window.keplr.getKey(chain.id);
-      // key.bech32Address, key.pubKey (Uint8Array), key.name
-      const pubKeyB64 = bytesToB64(key.pubKey);
-      setConnected(key.bech32Address, pubKeyB64, chain);
+      setConnected(key.bech32Address, bytesToB64(key.pubKey), chain);
     } catch (err) {
-      btn.textContent = 'Connect Keplr';
-      btn.disabled    = false;
+      btn.textContent = 'Connect Keplr'; btn.disabled = false;
       showResult('signResult', 'error', '&#10007; Connection failed', [{
         key: 'Error', val: err.message || 'User rejected the request'
       }]);
@@ -448,35 +473,21 @@
   async function signMessage() {
     const msgVal  = document.getElementById('signMessage').value.trim();
     const signBtn = document.getElementById('signBtn');
-
     if (!msgVal) {
-      showResult('signResult', 'error', '&#10007; Missing input', [{
-        key: 'Error', val: 'Please enter a message to sign.'
-      }]);
+      showResult('signResult', 'error', '&#10007; Missing input', [{ key: 'Error', val: 'Please enter a message to sign.' }]);
       return;
     }
     if (!connectedAddr) {
-      showResult('signResult', 'error', '&#10007; Not connected', [{
-        key: 'Error', val: 'Connect your Keplr wallet first.'
-      }]);
+      showResult('signResult', 'error', '&#10007; Not connected', [{ key: 'Error', val: 'Connect your Keplr wallet first.' }]);
       return;
     }
-
     signBtn.innerHTML = '<span class="spinner"></span> Waiting for Keplr…';
-    signBtn.disabled  = true;
-
+    signBtn.disabled = true;
     try {
-      // Keplr signArbitrary uses ADR-036 internally
-      const sig = await window.keplr.signArbitrary(
-        connectedChain.id,
-        connectedAddr,
-        msgVal
-      );
-      // sig = { signature: base64, pub_key: { type, value: base64 } }
+      const sig = await window.keplr.signArbitrary(connectedChain.id, connectedAddr, msgVal);
       const pubKeyB64 = sig.pub_key.value;
       const sigB64    = sig.signature;
 
-      // Auto-fill verify tab
       document.getElementById('verifyMessage').value   = msgVal;
       document.getElementById('verifyAddress').value   = connectedAddr;
       document.getElementById('verifySignature').value = sigB64;
@@ -489,12 +500,9 @@
         { key: 'Chain',      val: connectedChain.id },
       ]);
     } catch (err) {
-      showResult('signResult', 'error', '&#10007; Signing failed', [{
-        key: 'Error', val: err.message || 'User rejected the signing request.'
-      }]);
+      showResult('signResult', 'error', '&#10007; Signing failed', [{ key: 'Error', val: err.message || 'User rejected the signing request.' }]);
     } finally {
-      signBtn.disabled    = false;
-      signBtn.textContent = 'Sign Message';
+      signBtn.disabled = false; signBtn.textContent = 'Sign Message';
     }
   }
 
@@ -506,33 +514,23 @@
     const pubKeyB64 = document.getElementById('verifyPubKey').value.trim();
 
     if (!message || !address || !sigB64 || !pubKeyB64) {
-      showResult('verifyResult', 'error', '&#10007; Missing fields', [{
-        key: 'Error', val: 'All four fields are required.'
-      }]);
+      showResult('verifyResult', 'error', '&#10007; Missing fields', [{ key: 'Error', val: 'All four fields are required.' }]);
       return;
     }
-
     try {
-      // 1. Reconstruct ADR-036 amino sign bytes
-      const signBytes = makeADR36SignBytes(address, message);
+      const ec         = getEC();
+      const signBytes  = makeADR36SignBytes(address, message);
+      const hashHex    = sha256Hex(signBytes);
+      const sigBytes   = b64ToBytes(sigB64);
+      const pubBytes   = b64ToBytes(pubKeyB64);
 
-      // 2. SHA-256 hash of the sign bytes
-      const hashHex = sha256(signBytes);
+      if (sigBytes.length !== 64) throw new Error(`Signature must be 64 bytes (got ${sigBytes.length})`);
+      if (pubBytes.length !== 33)  throw new Error(`Public key must be 33 bytes (got ${pubBytes.length})`);
 
-      // 3. Decode signature and public key
-      const sigBytes    = b64ToBytes(sigB64);
-      const pubKeyBytes = b64ToBytes(pubKeyB64);
-
-      if (sigBytes.length !== 64)
-        throw new Error(`Signature must be 64 bytes (got ${sigBytes.length})`);
-      if (pubKeyBytes.length !== 33)
-        throw new Error(`Public key must be 33 bytes compressed secp256k1 (got ${pubKeyBytes.length})`);
-
-      // 4. Verify secp256k1 signature (r = first 32 bytes, s = last 32 bytes)
-      const key    = ec.keyFromPublic(pubKeyBytes);
-      const r      = Array.from(sigBytes.slice(0, 32));
-      const s      = Array.from(sigBytes.slice(32, 64));
-      const valid  = ec.verify(hashHex, { r, s }, key);
+      const key   = ec.keyFromPublic(pubBytes);
+      const r     = Array.from(sigBytes.slice(0, 32));
+      const s     = Array.from(sigBytes.slice(32, 64));
+      const valid = ec.verify(hashHex, { r, s }, key);
 
       if (!valid) {
         showResult('verifyResult', 'error', '&#10007; Invalid signature', [{
@@ -541,43 +539,20 @@
         return;
       }
 
-      // 5. Derive address from public key and confirm it matches
-      const prefix   = getPrefix(address);
-      const derived  = pubKeyToAddress(pubKeyB64, prefix);
-      const matches  = derived.toLowerCase() === address.toLowerCase();
+      const prefix  = getPrefix(address);
+      const derived = pubKeyToAddress(pubKeyB64, prefix);
+      const matches = derived.toLowerCase() === address.toLowerCase();
 
       showResult('verifyResult', 'success', '&#10003; Signature verified', [
-        { key: 'Result',          val: 'Valid secp256k1 signature ✓' },
-        { key: 'Signer Address',  val: derived },
-        { key: 'Address Match',   val: matches ? 'Yes — public key matches the provided address ✓' : `⚠ Derived ${derived} but provided ${address}` },
-        { key: 'Public Key',      val: pubKeyB64 },
+        { key: 'Result',         val: 'Valid secp256k1 signature ✓' },
+        { key: 'Signer Address', val: derived },
+        { key: 'Address Match',  val: matches ? 'Yes — public key matches the provided address ✓' : `⚠ Derived: ${derived}  |  Provided: ${address}` },
+        { key: 'Public Key',     val: pubKeyB64 },
       ]);
     } catch (err) {
-      showResult('verifyResult', 'error', '&#10007; Verification error', [{
-        key: 'Error', val: err.message || 'Check that all fields are correct.'
-      }]);
+      showResult('verifyResult', 'error', '&#10007; Verification error', [{ key: 'Error', val: err.message || 'Check that all fields are correct.' }]);
     }
   }
-
-  // ── Tabs ───────────────────────────────────────────────────────────────────
-  function switchTab(name) {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-    const cap = name[0].toUpperCase() + name.slice(1);
-    document.getElementById('tab' + cap).classList.add('active');
-    document.getElementById('panel-' + name).classList.add('active');
-  }
-
-  // ── Wire up ────────────────────────────────────────────────────────────────
-  document.getElementById('connectBtn').addEventListener('click', connectWallet);
-  document.getElementById('disconnectBtn').addEventListener('click', disconnectWallet);
-  document.getElementById('signBtn').addEventListener('click', signMessage);
-  document.getElementById('verifyBtn').addEventListener('click', verifyMessage);
-  document.getElementById('tabSign').addEventListener('click', () => switchTab('sign'));
-  document.getElementById('tabVerify').addEventListener('click', () => switchTab('verify'));
-  document.getElementById('walletAddress').addEventListener('click', () => {
-    if (connectedAddr) copyText(connectedAddr);
-  });
 </script>
 </body>
 </html>
