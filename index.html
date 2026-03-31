@@ -6,8 +6,15 @@
   <title>Cosmosign — Sign & Verify with Keplr</title>
   <!-- crypto-js: SHA-256 + RIPEMD-160 (reliable UMD browser build) -->
   <script src="https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.js"></script>
-  <!-- elliptic: secp256k1 (UMD browser build) -->
-  <script src="https://cdn.jsdelivr.net/npm/elliptic@6.5.4/dist/elliptic.min.js"></script>
+  <!-- @noble/secp256k1: loaded as isolated module so a failure can't break tabs/buttons -->
+  <script type="module">
+    try {
+      const secp = await import('https://cdn.jsdelivr.net/npm/@noble/secp256k1@1.7.1/+esm');
+      window._secp256k1 = secp;
+    } catch (e) {
+      console.error('[Cosmosign] secp256k1 failed to load:', e);
+    }
+  </script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -247,10 +254,10 @@
   let connectedPubKey = null;
   let connectedChain  = null;
 
-  // ── Crypto helpers (lazy — only called inside async/try-catch) ─────────────
-  function getEC() {
-    if (typeof elliptic === 'undefined') throw new Error('elliptic library did not load — check your internet connection and reload.');
-    return new elliptic.ec('secp256k1');
+  // ── Crypto helpers (lazy — only called inside try-catch) ──────────────────
+  function getSecp() {
+    if (!window._secp256k1) throw new Error('Verification library is still loading — please wait a moment and try again.');
+    return window._secp256k1;
   }
 
   // crypto-js WordArray → regular byte array
@@ -265,10 +272,6 @@
     if (typeof CryptoJS === 'undefined') throw new Error('crypto-js library did not load — check your internet connection and reload.');
     const wa = CryptoJS.SHA256(CryptoJS.lib.WordArray.create(input));
     return wordArrayToBytes(wa);
-  }
-
-  function sha256Hex(input) {
-    return sha256Bytes(input).map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
   function ripemd160Bytes(input) {
@@ -518,19 +521,17 @@
       return;
     }
     try {
-      const ec         = getEC();
-      const signBytes  = makeADR36SignBytes(address, message);
-      const hashHex    = sha256Hex(signBytes);
-      const sigBytes   = b64ToBytes(sigB64);
-      const pubBytes   = b64ToBytes(pubKeyB64);
+      const secp      = getSecp();
+      const signBytes = makeADR36SignBytes(address, message);
+      const hashBytes = new Uint8Array(sha256Bytes(signBytes));
+      const sigBytes  = b64ToBytes(sigB64);
+      const pubBytes  = b64ToBytes(pubKeyB64);
 
       if (sigBytes.length !== 64) throw new Error(`Signature must be 64 bytes (got ${sigBytes.length})`);
-      if (pubBytes.length !== 33)  throw new Error(`Public key must be 33 bytes (got ${pubBytes.length})`);
+      if (pubBytes.length !== 33)  throw new Error(`Public key must be 33 bytes compressed secp256k1 (got ${pubBytes.length})`);
 
-      const key   = ec.keyFromPublic(pubBytes);
-      const r     = Array.from(sigBytes.slice(0, 32));
-      const s     = Array.from(sigBytes.slice(32, 64));
-      const valid = ec.verify(hashHex, { r, s }, key);
+      // @noble/secp256k1 verify(sig64, hash32, pubkey33) → boolean
+      const valid = secp.verify(sigBytes, hashBytes, pubBytes);
 
       if (!valid) {
         showResult('verifyResult', 'error', '&#10007; Invalid signature', [{
